@@ -1,0 +1,154 @@
+<cfscript>
+        
+        
+        //can inner function read params of outer?  yes but without 'arguments.' and in the body of the function only not as the default of the argument.
+        //only other way to compare two queries at specified columns and rows is to loop through one while querying or indexing into the other within that loop.
+       
+		boolean function linearQueryCompare(required query q1, required query q2, required string cols, required numeric startRow="1", required numeric endRow="#min(arguments.q1.recordCount, arguments.q2.recordCount)#")
+        {
+            arguments.cols = listQualify(arguments.cols,'"');
+        
+            string function getListOverlap(required string list1, required string list2)
+            {
+                var o = '';
+                
+                for(var i=1;i<=listLen(arguments.list1);i++){
+                    var p = listGetAt(arguments.list1,i);
+                    
+                    if(listContainsNoCase(arguments.list2,p)){
+                        o = listAppend(o,p);
+                    }
+                }
+
+                return o;        
+            }
+        
+            string function getAllJSONColumns(required query q)
+            {
+                return rereplacenocase(serializeJSON(arguments.q),'(?x)\{"COLUMNS":\[ ([^\]]+) \],"DATA":([^\}]+)\}','\1');
+            }
+        
+            string function getAllJSONRows(required query q)
+            {
+                return rereplacenocase(serializeJSON(arguments.q),'(?x)\{"COLUMNS":\[ ([^\]]+) \],"DATA":([^\}]+)\}','\2');
+            }
+        
+            string function getColsExpr(required string allCols)
+            {
+                var colsExpr = '\[([^,]+)';
+                
+                for(var i=1;i<=listLen(arguments.allCols)-1;i++){
+                    colsExpr = listAppend(colsExpr,'([^,]+)');
+                }
+                
+                colsExpr = colsExpr & '\]';
+                
+                return colsExpr;
+            }
+            
+            string function getColsReplaceExpr(required string cols, required string allCols)
+            {
+                //could throw exception here if not found vice 'selectedColumnsOK' but this way is cleaner
+                var colsReplaceExpr = '[\' & listFindNoCase(arguments.allCols, listFirst(arguments.cols));
+                
+                for(var i=2;i<=listLen(arguments.cols);i++){
+                    colsReplaceExpr = listAppend(colsReplaceExpr,'\' & listFindNoCase(arguments.allCols, listGetAt(arguments.cols,i)));
+                }
+                
+                colsReplaceExpr = colsReplaceExpr & ']';
+                
+                return colsReplaceExpr;
+            }
+            
+            string function getSelectedJSONRows(required string JSONRows, required numeric recordCount)
+            {
+                var endLength = (endRow < arguments.recordCount)? arguments.recordCount-endRow:0;
+                
+                return rereplace(arguments.JSONRows,'(?x)^\[(\[ [^\]]+ \],){#startRow-1#}(.+)(,\[ [^\]]+ \]){#endLength#}\]$','\2');
+            }
+        
+            string function getJSONData(required query q, required string allCols)
+            {
+                var allRows = getAllJSONRows(arguments.q);
+                
+                //retrieve JSON data as per specified start row, end row and columns
+                return rereplace(getSelectedJSONRows(allRows,arguments.q.recordCount),getColsExpr(arguments.allCols),getColsReplaceExpr(cols,arguments.allCols),'all');
+            }
+        
+            boolean function selectedColumnsOK(required string cols, required string allCols1, required string allCols2)
+            {
+                return (listSort(getListOverlap(getListOverlap(arguments.allCols1,arguments.allCols2),arguments.cols),'textnocase') is listsort(arguments.cols,'textnocase'));
+            }
+            
+            var cols1 = getAllJSONColumns(arguments.q1);
+            var cols2 = getAllJSONColumns(arguments.q2);
+            
+            if(!selectedColumnsOK(arguments.cols,cols1,cols2)){
+                throw "Invalid columns.";
+            }
+            
+            return (getJSONData(arguments.q1,cols1) is getJSONData(arguments.q2,cols2));
+        }
+        
+        //q1, q2 need to be ordered by same 'key' fields.   
+        //runs in linear time O(n) as opposed to quadratic O(n^2) or O(nlogn) time
+        query function linearQueryMerge(required query q1, required query q2, required string keyFields, required string setValueField, required string getValueField)
+        {
+            
+            boolean function keySame(required string key1, required string key2)
+            {
+                return (arguments.key1 is arguments.key2);
+            }
+            
+            boolean function key1GT(required string key1, required string key2)
+            {  var x=1;
+                for (; x <= listlen(arguments.key1); x++){
+                  if(listGetAt(arguments.key1, x) GT listGetAt(arguments.key2, x))
+                     return true;
+                }
+               return false;
+            }
+            
+            string function createCompareList(required query q, required string keyFields, required numeric rowNum)
+            {
+                var str='';
+                var x=1;
+                while(x <= listlen(arguments.keyFields)){
+                    str &= q[listGetAt(arguments.keyFields, x++)][arguments.rowNum];
+                }
+                return str;
+            }
+            
+            ////////////////////////////////////////////
+            
+            var q1Key=''; var q2Key=''; var idxQ1=1; var idxQ2=1;
+            
+            while((idxQ1 <= arguments.q1.recordCount) and (idxQ2 <= arguments.q2.recordCount)){
+                q1Key = createCompareList(arguments.q1,arguments.keyFields,idxQ1);
+                q2Key = createCompareList(arguments.q2,arguments.keyFields,idxQ2);
+                
+                if(keySame(q1Key,q2Key)){
+                      //if detail query is 'vertical'
+                      if(left(arguments.getValueField,2) is 'q1'){
+                         var curGetValField = q1[right(arguments.getValueField,len(arguments.getValueField)-2)][idxQ1];
+                      }else{
+                         var curGetValField = arguments.getValueField;
+                      }
+                      
+                      arguments.q1[arguments.setValueField][idxQ1] = arguments.q2[curGetValField][idxQ2];
+                      
+                      //do not increment the detail query index(idxQ2) here as it might be a 'vertical query' with multiple columns/values per row
+                      idxQ1++;
+                }else{
+                    if(key1GT(q1Key,q2Key)){
+                        idxQ2++;
+                    }else{
+                        idxQ1++;
+                    }
+                }
+            }
+            
+            return arguments.q1;
+        }
+        
+     </cfscript>
